@@ -90,6 +90,7 @@ struct Team {
     
     vector<int> getSolveTimes() const {
         vector<int> times;
+        times.reserve(26); // Max 26 problems
         for (const auto& pair : problems) {
             if (pair.second.is_solved && !pair.second.is_frozen) {
                 times.push_back(pair.second.first_correct_time);
@@ -205,80 +206,103 @@ public:
         // Display scoreboard before scrolling
         displayScoreboard();
         
-        // Implement scroll logic
+        // Implement scroll logic more efficiently
         vector<string> rankingChanges;
         
-        while (true) {
-            // Find the lowest-ranked team with frozen problems
-            string teamToUnfreeze = "";
-            char problemToUnfreeze = '\0';
+        // Collect all frozen problems first
+        vector<pair<pair<string, char>, bool>> frozenProblems; // team, problem, solvedDuringFreeze
+        
+        for (auto& teamPair : teams) {
+            const string& teamName = teamPair.first;
+            Team& team = teamPair.second;
             
-            for (int i = last_flush_ranking.size() - 1; i >= 0; i--) {
-                const string& teamName = last_flush_ranking[i];
-                Team& team = teams[teamName];
-                
-                // Find the smallest problem number that is frozen
-                for (char c = 'A'; c < 'A' + problem_count; c++) {
-                    if (team.problems[c].is_frozen) {
-                        teamToUnfreeze = teamName;
-                        problemToUnfreeze = c;
-                        break;
-                    }
-                }
-                if (!teamToUnfreeze.empty()) break;
-            }
-            
-            if (teamToUnfreeze.empty()) break; // No more frozen problems
-            
-            // Unfreeze the problem
-            Team& team = teams[teamToUnfreeze];
-            ProblemStatus& probStatus = team.problems[problemToUnfreeze];
-            probStatus.is_frozen = false;
-            
-            // Check if this problem was actually solved during freeze
-            // We need to look at submissions after freeze to see if there was an Accepted
-            bool solvedDuringFreeze = false;
-            for (const auto& submission : team.submissions) {
-                if (submission.problem_name[0] == problemToUnfreeze && 
-                    submission.time > freeze_time && 
-                    submission.status == Status::ACCEPTED &&
-                    !probStatus.is_solved) {
-                    probStatus.is_solved = true;
-                    probStatus.first_correct_time = submission.time;
-                    solvedDuringFreeze = true;
-                    break;
-                }
-            }
-            
-            // Update rankings and check for changes
-            vector<string> oldRanking = last_flush_ranking;
-            updateRanking();
-            
-            // Check if ranking changed
-            if (oldRanking != last_flush_ranking && solvedDuringFreeze) {
-                int newSolved = team.getSolvedCount();
-                int newPenalty = team.getTotalPenalty();
-                
-                // Find who got replaced
-                string replacedTeam = "";
-                for (size_t i = 0; i < oldRanking.size(); i++) {
-                    if (oldRanking[i] != teamToUnfreeze && 
-                        find(last_flush_ranking.begin(), last_flush_ranking.end(), oldRanking[i]) != last_flush_ranking.end()) {
-                        auto oldPos = find(oldRanking.begin(), oldRanking.end(), teamToUnfreeze) - oldRanking.begin();
-                        auto newPos = find(last_flush_ranking.begin(), last_flush_ranking.end(), teamToUnfreeze) - last_flush_ranking.begin();
-                        if (newPos < oldPos) {
-                            replacedTeam = last_flush_ranking[newPos + 1];
+            for (char c = 'A'; c < 'A' + problem_count; c++) {
+                if (team.problems[c].is_frozen) {
+                    // Check if solved during freeze
+                    bool solvedDuringFreeze = false;
+                    for (const auto& submission : team.submissions) {
+                        if (submission.problem_name[0] == c && 
+                            submission.time > freeze_time && 
+                            submission.status == Status::ACCEPTED &&
+                            !team.problems[c].is_solved) {
+                            solvedDuringFreeze = true;
                             break;
                         }
                     }
-                }
-                
-                if (!replacedTeam.empty()) {
-                    rankingChanges.push_back(teamToUnfreeze + " " + replacedTeam + " " + 
-                                           to_string(newSolved) + " " + to_string(newPenalty));
+                    frozenProblems.push_back({{teamName, c}, solvedDuringFreeze});
                 }
             }
         }
+        
+        // Sort frozen problems by ranking (lowest first) then problem number
+        sort(frozenProblems.begin(), frozenProblems.end(), [this](const auto& a, const auto& b) {
+            const string& teamA = a.first.first;
+            const string& teamB = b.first.first;
+            
+            auto posA = find(last_flush_ranking.begin(), last_flush_ranking.end(), teamA);
+            auto posB = find(last_flush_ranking.begin(), last_flush_ranking.end(), teamB);
+            
+            int rankA = (posA != last_flush_ranking.end()) ? (posA - last_flush_ranking.begin()) : last_flush_ranking.size();
+            int rankB = (posB != last_flush_ranking.end()) ? (posB - last_flush_ranking.begin()) : last_flush_ranking.size();
+            
+            if (rankA != rankB) return rankA > rankB; // Lower rank = higher number
+            return a.first.second < b.first.second; // Smaller problem first
+        });
+        
+        // Unfreeze problems one by one
+        for (auto& frozenProb : frozenProblems) {
+            string teamName = frozenProb.first.first;
+            char problem = frozenProb.first.second;
+            bool solvedDuringFreeze = frozenProb.second;
+            
+            Team& team = teams[teamName];
+            ProblemStatus& probStatus = team.problems[problem];
+            
+            // Unfreeze
+            probStatus.is_frozen = false;
+            
+            // Apply solve if it happened during freeze
+            if (solvedDuringFreeze && !probStatus.is_solved) {
+                for (const auto& submission : team.submissions) {
+                    if (submission.problem_name[0] == problem && 
+                        submission.time > freeze_time && 
+                        submission.status == Status::ACCEPTED) {
+                        probStatus.is_solved = true;
+                        probStatus.first_correct_time = submission.time;
+                        break;
+                    }
+                }
+            }
+            
+            // Check ranking change
+            if (solvedDuringFreeze) {
+                vector<string> oldRanking = last_flush_ranking;
+                updateRanking();
+                
+                auto oldPos = find(oldRanking.begin(), oldRanking.end(), teamName);
+                auto newPos = find(last_flush_ranking.begin(), last_flush_ranking.end(), teamName);
+                
+                if (oldPos != oldRanking.end() && newPos != last_flush_ranking.end()) {
+                    size_t oldIndex = oldPos - oldRanking.begin();
+                    size_t newIndex = newPos - last_flush_ranking.begin();
+                    
+                    if (newIndex < oldIndex) {
+                        int newSolved = team.getSolvedCount();
+                        int newPenalty = team.getTotalPenalty();
+                        
+                        // Find who got replaced
+                        if (newIndex + 1 < last_flush_ranking.size()) {
+                            string replacedTeam = last_flush_ranking[newIndex + 1];
+                            rankingChanges.push_back(teamName + " " + replacedTeam + " " + 
+                                                   to_string(newSolved) + " " + to_string(newPenalty));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Final ranking update
+        updateRanking();
         
         // Output ranking changes
         for (const string& change : rankingChanges) {
@@ -345,7 +369,11 @@ private:
     int current_time = 0;
     
     void updateRanking() {
+        last_flush_ranking.clear();
+        last_flush_ranking.reserve(teams.size());
+        
         vector<pair<string, Team*>> teamList;
+        teamList.reserve(teams.size());
         for (auto& pair : teams) {
             teamList.emplace_back(pair.first, &pair.second);
         }
@@ -377,7 +405,6 @@ private:
             return a.first < b.first;
         });
         
-        last_flush_ranking.clear();
         for (const auto& pair : teamList) {
             last_flush_ranking.push_back(pair.first);
         }
@@ -386,13 +413,13 @@ private:
     void displayScoreboard() {
         updateRanking();
         
-        for (const string& teamName : last_flush_ranking) {
+        for (size_t i = 0; i < last_flush_ranking.size(); i++) {
+            const string& teamName = last_flush_ranking[i];
             const Team& team = teams[teamName];
             int solved = team.getSolvedCount();
             int penalty = team.getTotalPenalty();
             
-            cout << teamName << " " << (find(last_flush_ranking.begin(), last_flush_ranking.end(), teamName) - last_flush_ranking.begin() + 1)
-                 << " " << solved << " " << penalty;
+            cout << teamName << " " << (i + 1) << " " << solved << " " << penalty;
             
             // Display problem status
             for (char c = 'A'; c < 'A' + problem_count; c++) {
